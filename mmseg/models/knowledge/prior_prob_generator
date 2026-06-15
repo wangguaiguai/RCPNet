@@ -1,0 +1,22 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from .registry import KNOWLEDGE
+
+
+@KNOWLEDGE.register_module()
+class PriorProbabilityGenerator(nn.Module):
+
+    def __init__(self, embed_dim, num_classes, temperature=3.0):
+        super().__init__()
+
+        self.head = nn.Conv2d(embed_dim, num_classes, 1)
+        self.temperature = temperature
+
+    def forward(self, z):
+
+        logits = self.head(z)
+
+        logits = logits / self.temperature
+
+        return logits
