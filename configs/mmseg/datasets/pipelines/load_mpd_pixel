@@ -1,0 +1,44 @@
+import os
+import numpy as np
+from mmseg.datasets.builder import PIPELINES
+
+
+@PIPELINES.register_module()
+class LoadMPDPixelFromFile:
+
+    def __init__(self, mpd_root):
+        self.mpd_root = mpd_root
+        self.mean = np.load(
+            "XX",
+            allow_pickle=True
+        ).item()
+
+        self.std = np.load(
+            "XX",
+            allow_pickle=True
+        ).item()
+
+    def __call__(self, results):
+
+        fname = os.path.splitext(results['img_info']['filename'])[0]
+        mpd_path = os.path.join(self.mpd_root, fname + '.npy')
+
+        mpd_dict = np.load(mpd_path, allow_pickle=True).item()
+
+        mpd = {
+            'XX': mpd_dict['XX'].astype(np.float32),
+            'XX': mpd_dict['XX'].astype(np.float32),
+            'XX': mpd_dict['XX'].astype(np.float32),
+            'XX': mpd_dict['XX'].astype(np.float32),
+            'XX': mpd_dict['XX'].astype(np.float32),
+            'XX': mpd_dict['XX'].astype(np.float32),
+        }
+
+        #normalize
+        for k in mpd:
+            mpd[k] = (mpd[k] - self.mean[k]) / (self.std[k] + 1e-6)
+            mpd[k] = np.transpose(mpd[k], (2, 0, 1))
+
+        results['mpd_pixel'] = mpd
+        return results
+
