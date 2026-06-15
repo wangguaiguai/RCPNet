@@ -1,4 +1,3 @@
-# ==================== 自定义模块 ====================
 custom_imports = dict(
     imports=[
         'mmseg.datasets.mine_dataset',
@@ -18,14 +17,12 @@ custom_imports = dict(
     allow_failed_imports=False
 )
 
-# ==================== Base 配置 ====================
 _base_ = [
     '../../_base_/models/upernet_swin.py',
     '../../_base_/default_runtime.py',
     '../../_base_/schedules/schedule_40k.py'
 ]
 
-# ==================== 数据集 ====================
 dataset_type = 'MineDataset'
 data_root = 'XX'
 
@@ -37,7 +34,7 @@ img_norm_cfg = dict(
 
 crop_size = (256, 256)
 
-# ==================== Pipeline ====================
+
 train_pipeline = [
     dict(type='LoadImageFromFileTIFRGB'),
     dict(type='LoadAnnotationsTIF'),
@@ -74,7 +71,7 @@ test_pipeline = [
 ]
 
 
-# ==================== Data ====================
+
 data = dict(
     samples_per_gpu=8,
     workers_per_gpu=8,
@@ -104,7 +101,7 @@ data = dict(
     )
 )
 
-# ==================== Model ====================
+
 norm_cfg = dict(type='BN', requires_grad=True)
 
 model = dict(
