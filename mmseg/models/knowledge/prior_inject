@@ -1,0 +1,45 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from .registry import KNOWLEDGE
+
+
+@KNOWLEDGE.register_module()
+class MultiScalePriorAttention(nn.Module):
+
+    def __init__(self, embed_dim, feat_dims):
+        super().__init__()
+
+        self.proj_layers = nn.ModuleList([
+            nn.Conv2d(embed_dim, c, 1)
+            for c in feat_dims
+        ])
+
+    def forward(self, z_list, feats, R):
+
+        out_feats = []
+        alpha = 0.9
+        for i, feat in enumerate(feats):
+            z = z_list[i]
+
+            z_scaled = F.interpolate(
+                z,
+                size=feat.shape[2:],
+                mode='bilinear',
+                align_corners=False
+            )
+
+            R_scaled = F.interpolate(
+                R,
+                size=feat.shape[2:],
+                mode='bilinear',
+                align_corners=False
+            )
+
+            bias = self.proj_layers[i](z_scaled)
+
+            out = feat + alpha * R_scaled * bias
+
+            out_feats.append(out)
+
+        return tuple(out_feats)
