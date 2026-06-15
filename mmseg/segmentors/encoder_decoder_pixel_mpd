@@ -1,0 +1,204 @@
+import torch
+import torch.nn.functional as F
+import math
+from torch import nn
+from mmseg.models.builder import SEGMENTORS
+from mmseg.models.segmentors.encoder_decoder import EncoderDecoder
+from mmcv.utils import build_from_cfg
+from mmseg.models.knowledge.registry import KNOWLEDGE
+from mmseg.models.builder import build_loss
+from mmseg.models.knowledge.mpd_attention_wrapper import MPDAttentionWrapper
+
+
+@SEGMENTORS.register_module()
+class EncoderDecoderPixelMPD(EncoderDecoder):
+
+    def __init__(self,
+                 mpe,
+                 ppg,
+                 pam,
+                 prior_loss,
+                 cons_loss,
+                 prior_warmup_iters=3000,
+                 prior_max_weight=0.05,
+                 use_prior=True,
+                 use_cons=True,
+                 use_attention=True,
+                 **kwargs):
+
+
+        super().__init__(**kwargs)
+
+        self.mpe = build_from_cfg(mpe, KNOWLEDGE)
+        self.ppg = build_from_cfg(ppg, KNOWLEDGE)
+        self.pam = build_from_cfg(pam, KNOWLEDGE)
+
+        self.prior_loss = build_loss(prior_loss)
+        self.cons_loss = build_loss(cons_loss)
+
+        self.global_step = 0
+
+        self.swin_proj = nn.ModuleList([
+            nn.Conv2d(96, 128, 1),
+            nn.Conv2d(192, 128, 1),
+            nn.Conv2d(384, 128, 1),
+            nn.Conv2d(768, 128, 1),
+        ])
+
+        self.prior_warmup_iters = prior_warmup_iters
+        self.prior_max_weight = prior_max_weight
+
+        self.use_prior = use_prior
+        self.use_cons = use_cons
+        self.use_attention = use_attention
+
+
+    # Prior KL Warmup
+    def get_prior_weight(self):
+
+        cur_iter = self.global_step
+
+        if cur_iter >= self.prior_warmup_iters:
+            return self.prior_max_weight
+
+        weight = self.prior_max_weight * (
+                1 - math.cos(math.pi * cur_iter / self.prior_warmup_iters)
+        ) / 2
+
+        return weight
+
+    def extract_feat(self, img, mpd_pixel):
+        if self.use_prior or self.use_cons or self.use_attention:
+            z_list = self.mpe(mpd_pixel)
+        else:
+            z_list = None
+
+        feats = list(self.backbone(img))
+
+        return feats, z_list
+
+    def forward_train(self,
+                      img,
+                      img_metas,
+                      gt_semantic_seg,
+                      mpd_pixel,
+                      **kwargs):
+
+        self.global_step += 1
+        feats, z_list = self.extract_feat(img, mpd_pixel)
+        losses = dict()
+
+        # PRIOR
+        if self.use_prior or self.use_cons or self.use_attention:
+            prior_logits_list = []
+            for z in z_list:
+                prior_i = self.ppg(z)
+
+                prior_i = F.interpolate(
+                    prior_i,
+                    size=feats[0].shape[2:],
+                    mode='bilinear',
+                    align_corners=False
+                )
+
+                prior_logits_list.append(prior_i)
+
+            prior_logits = sum(prior_logits_list) / len(prior_logits_list)
+            p_prior = F.softmax(prior_logits.detach(), dim=1)
+            entropy = -torch.sum(
+                p_prior * torch.log(p_prior + 1e-6),
+                dim=1,
+                keepdim=True
+            )
+
+            R = 1 - entropy / math.log(p_prior.shape[1])
+
+
+        #Attention
+        if self.use_attention:
+            feats = self.pam(z_list, feats, R)
+        pred = self.decode_head(feats)
+        loss_decode = self.decode_head.losses(pred, gt_semantic_seg)
+        losses.update(loss_decode)
+
+
+        # PRIOR KL
+        if self.use_prior:
+            w = self.get_prior_weight()
+            losses['loss_prior'] = w * self.prior_loss(pred, prior_logits, R)
+
+
+        # Consistency
+        if self.use_cons:
+            loss_cons = 0
+            for i in range(len(z_list)):
+                z_mpd = z_list[i]
+                feat_swin = feats[i]
+                z_swin = self.swin_proj[i](feat_swin)
+                z_mpd = F.interpolate(
+                    z_mpd,
+                    size=z_swin.shape[2:],
+                    mode='bilinear',
+                    align_corners=False
+                )
+
+                R_scaled = F.interpolate(
+                    R,
+                    size=z_swin.shape[2:],
+                    mode='bilinear',
+                    align_corners=False
+                )
+                loss_cons += self.cons_loss(z_swin, z_mpd, R_scaled)
+            losses['loss_cons'] = loss_cons / len(z_list)
+        return losses
+
+
+    def simple_test(self, img, img_meta, rescale=True, **kwargs):
+
+        mpd_pixel = kwargs['mpd_pixel']
+        if isinstance(mpd_pixel, (list, tuple)):
+            mpd_pixel = mpd_pixel[0]
+        feats, z_list = self.extract_feat(img, mpd_pixel)
+
+        if self.use_prior or self.use_attention:
+
+            prior_logits_list = []
+            for z in z_list:
+                prior_i = self.ppg(z)
+                prior_i = F.interpolate(
+                    prior_i,
+                    size=feats[0].shape[2:],
+                    mode='bilinear',
+                    align_corners=False
+                )
+                prior_logits_list.append(prior_i)
+
+            prior_logits = sum(prior_logits_list) / len(prior_logits_list)
+            p_prior = F.softmax(prior_logits, dim=1)
+            entropy = -torch.sum(
+                p_prior * torch.log(p_prior + 1e-6),
+                dim=1,
+                keepdim=True
+            )
+            R = 1 - entropy / math.log(p_prior.shape[1])
+
+            if self.use_attention:
+                feats = self.pam(z_list, feats, R)
+
+        seg_logit = self.encode_decode_with_feats(feats, img, img_meta)
+        seg_pred = seg_logit.argmax(dim=1)
+        return list(seg_pred.cpu().numpy())
+
+    # -------------------------------------------------
+    def encode_decode_with_feats(self, feats, img, img_meta):
+        seg_logit = self._decode_head_forward_test(feats, img_meta)
+        seg_logit = F.interpolate(
+            seg_logit,
+            size=img.shape[2:],
+            mode='bilinear',
+            align_corners=self.align_corners
+        )
+        return seg_logit
+
+
+
