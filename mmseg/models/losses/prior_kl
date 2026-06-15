@@ -1,0 +1,34 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from mmseg.models.builder import LOSSES
+
+
+@LOSSES.register_module()
+class PriorKLLoss(nn.Module):
+
+    def __init__(self,
+                 loss_weight=0.05,
+                 eps=1e-6):
+
+        super().__init__()
+
+        self.loss_weight = loss_weight
+        self.eps = eps
+        self.loss_name = 'loss_prior'
+
+    def forward(self, pred, prior_logits, R):
+
+        log_p_pred = F.log_softmax(pred, dim=1)
+        p_prior = F.softmax(prior_logits, dim=1)
+
+     
+        kl_map = torch.sum(
+            p_prior * (torch.log(p_prior + self.eps) - log_p_pred),
+            dim=1,
+            keepdim=True
+        )
+
+        kl_map = kl_map * R
+
+        return kl_map.mean() * self.loss_weight
